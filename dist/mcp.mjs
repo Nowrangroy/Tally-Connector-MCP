@@ -10734,7 +10734,7 @@ ${voucherXml}
 
             // ── OCR FALLBACK for scanned / image-based PDFs ──────────────────
             if (rawText.trim().length < 50) {
-                console.log('[parse-bank-statement] No text extracted — PDF appears to be scanned. Attempting Claude Vision OCR...');
+                console.log('[parse-bank-statement] No text extracted — PDF appears to be scanned. Attempting Claude Vision OCR (batched)...');
                 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
                 if (!CLAUDE_API_KEY) {
                     throw new Error('PDF is image-based and CLAUDE_API_KEY is not set. Cannot OCR scanned bank statement.');
@@ -10743,100 +10743,98 @@ ${voucherXml}
                 const https = await import('https');
                 const { createCanvas } = await import('@napi-rs/canvas').catch(() => ({ createCanvas: null }));
 
-                let ocrPages = [];
+                if (!createCanvas) {
+                    throw new Error('PDF is image-based and canvas renderer is not available. Cannot OCR scanned bank statement.');
+                }
+
+                // ── Step 1: Render ALL pages to PNG (CPU-bound, fast) ──────────
+                console.log(`[OCR] Rendering ${pdfDoc.numPages} pages to PNG...`);
+                const pageImages = [];
                 for (let i = 1; i <= pdfDoc.numPages; i++) {
                     try {
                         const page = await pdfDoc.getPage(i);
-                        const viewport = page.getViewport({ scale: 2.0 });
-
-                        let imageBase64 = null;
-
-                        if (createCanvas) {
-                            const canvas = createCanvas(Math.floor(viewport.width), Math.floor(viewport.height));
-                            const ctx = canvas.getContext('2d');
-                            await page.render({ canvasContext: ctx, viewport }).promise;
-                            imageBase64 = canvas.toBuffer('image/png').toString('base64');
-                        } else {
-                            // Fallback: render using pdfjs internal annotation canvas
-                            const ops = await page.getOperatorList();
-                            // If no canvas, skip – text will remain empty for this page
-                            console.warn(`[OCR] page ${i}: canvas not available, skipping render`);
-                        }
-
-                        if (!imageBase64) continue;
-
-                        // Call Claude Vision API to extract text from the page
-                        const claudeBody = JSON.stringify({
-                            model: 'claude-opus-4-5',
-                            max_tokens: 4096,
-                            messages: [{
-                                role: 'user',
-                                content: [
-                                    {
-                                        type: 'text',
-                                        text: 'This is a bank statement page. Extract ALL the text exactly as it appears, preserving the table structure. Output ONLY the raw text with no explanation. Preserve date formats like DD/MM/YY and number formats like 1,23,456.78.'
-                                    },
-                                    {
-                                        type: 'image',
-                                        source: {
-                                            type: 'base64',
-                                            media_type: 'image/png',
-                                            data: imageBase64
-                                        }
-                                    }
-                                ]
-                            }]
-                        });
-
-                        const ocrText = await new Promise((resolve, reject) => {
-                            const req = https.request({
-                                hostname: 'api.anthropic.com',
-                                path: '/v1/messages',
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'x-api-key': CLAUDE_API_KEY,
-                                    'anthropic-version': '2023-06-01',
-                                    'Content-Length': Buffer.byteLength(claudeBody)
-                                }
-                            }, (res) => {
-                                let data = '';
-                                res.on('data', chunk => data += chunk);
-                                res.on('end', () => {
-                                    try {
-                                        const parsed = JSON.parse(data);
-                                        if (parsed.error) {
-                                            reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
-                                            return;
-                                        }
-                                        const extracted = parsed.content?.[0]?.text || '';
-                                        resolve(extracted);
-                                    } catch (e) {
-                                        reject(e);
-                                    }
-                                });
-                            });
-                            req.on('error', reject);
-                            req.write(claudeBody);
-                            req.end();
-                        });
-
-                        console.log(`[OCR] Page ${i}: extracted ${ocrText.length} chars`);
-                        ocrPages.push(ocrText);
-                    } catch (pageErr) {
-                        console.warn(`[OCR] Page ${i} failed:`, pageErr.message);
+                        // Use scale=1.5 (not 2.0) for smaller images → faster upload + cheaper API
+                        const viewport = page.getViewport({ scale: 1.5 });
+                        const canvas = createCanvas(Math.floor(viewport.width), Math.floor(viewport.height));
+                        const ctx = canvas.getContext('2d');
+                        await page.render({ canvasContext: ctx, viewport }).promise;
+                        const imageBase64 = canvas.toBuffer('image/png').toString('base64');
+                        pageImages.push({ pageNum: i, imageBase64 });
+                        console.log(`[OCR] Page ${i} rendered: ${Math.round(imageBase64.length / 1024)}KB`);
+                    } catch (renderErr) {
+                        console.warn(`[OCR] Page ${i} render failed:`, renderErr.message);
                     }
                 }
 
-                if (ocrPages.length > 0) {
-                    text = ocrPages.join('\n');
-                    rawText = ocrPages.join(' ').replace(/\s+/g, ' ').trim();
-                    console.log(`[parse-bank-statement] OCR complete. Total text length: ${rawText.length}`);
+                if (pageImages.length === 0) {
+                    throw new Error('PDF is image-based and all pages failed to render. Please upload a text-based PDF or Excel file instead.');
+                }
+
+                // ── Step 2: ONE batched Claude API call with ALL pages ──────────
+                // Claude supports up to 20 images in a single message.
+                // We send all pages at once so the total API time is ~10-15s instead of 11×10s.
+                console.log(`[OCR] Sending ${pageImages.length} pages to Claude Vision API in a single request...`);
+                const contentBlocks = [
+                    {
+                        type: 'text',
+                        text: `This is a scanned bank statement with ${pageImages.length} pages. Each image below is one page. Extract ALL transaction text from EVERY page exactly as it appears, preserving the table structure. Output the extracted text for each page separated by "--- PAGE N ---" markers. Preserve date formats like DD/MM/YY and number formats like 1,23,456.78. For each transaction row, output it as: DATE | NARRATION | CHQREF | VALUEDATE | AMOUNT | BALANCE. Include continuation lines for multi-line narrations as: | | EXTRA NARRATION | | | | |`
+                    },
+                    ...pageImages.map(({ pageNum, imageBase64 }) => ({
+                        type: 'image',
+                        source: { type: 'base64', media_type: 'image/png', data: imageBase64 }
+                    }))
+                ];
+
+                const claudeBody = JSON.stringify({
+                    model: 'claude-opus-4-5',
+                    max_tokens: 8192,
+                    messages: [{ role: 'user', content: contentBlocks }]
+                });
+
+                const ocrResult = await new Promise((resolve, reject) => {
+                    const req = https.request({
+                        hostname: 'api.anthropic.com',
+                        path: '/v1/messages',
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'x-api-key': CLAUDE_API_KEY,
+                            'anthropic-version': '2023-06-01',
+                            'Content-Length': Buffer.byteLength(claudeBody)
+                        },
+                        timeout: 120000 // 2-minute timeout for OCR API call
+                    }, (res) => {
+                        let data = '';
+                        res.on('data', chunk => data += chunk);
+                        res.on('end', () => {
+                            try {
+                                const parsed = JSON.parse(data);
+                                if (parsed.error) {
+                                    reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
+                                    return;
+                                }
+                                resolve(parsed.content?.[0]?.text || '');
+                            } catch (e) { reject(e); }
+                        });
+                    });
+                    req.on('error', reject);
+                    req.on('timeout', () => { req.destroy(); reject(new Error('Claude OCR API request timed out')); });
+                    req.write(claudeBody);
+                    req.end();
+                });
+
+                console.log(`[OCR] Batched OCR complete. Extracted ${ocrResult.length} chars across ${pageImages.length} pages.`);
+
+                if (ocrResult.trim().length > 0) {
+                    // Strip the "--- PAGE N ---" separators but keep the content
+                    text = ocrResult.replace(/---\s*PAGE\s*\d+\s*---/gi, '\n');
+                    rawText = text.replace(/\s+/g, ' ').trim();
                 } else {
-                    throw new Error('PDF is image-based and OCR extraction also failed. Please upload a text-based PDF or Excel file instead.');
+                    throw new Error('PDF is image-based and OCR extraction returned empty text. Please upload a text-based PDF or Excel file instead.');
                 }
             }
             // ── End OCR fallback ─────────────────────────────────────────────
+
 
             const lines = text.split('\n');
 
