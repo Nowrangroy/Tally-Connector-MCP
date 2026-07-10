@@ -10731,11 +10731,118 @@ ${voucherXml}
                 rawText += (rawText ? ' ' : '') + pageText;
             }
             rawText = rawText.replace(/\s+/g, ' ').trim();
+
+            // ── OCR FALLBACK for scanned / image-based PDFs ──────────────────
+            if (rawText.trim().length < 50) {
+                console.log('[parse-bank-statement] No text extracted — PDF appears to be scanned. Attempting Claude Vision OCR...');
+                const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
+                if (!CLAUDE_API_KEY) {
+                    throw new Error('PDF is image-based and CLAUDE_API_KEY is not set. Cannot OCR scanned bank statement.');
+                }
+
+                const https = await import('https');
+                const { createCanvas } = await import('@napi-rs/canvas').catch(() => ({ createCanvas: null }));
+
+                let ocrPages = [];
+                for (let i = 1; i <= pdfDoc.numPages; i++) {
+                    try {
+                        const page = await pdfDoc.getPage(i);
+                        const viewport = page.getViewport({ scale: 2.0 });
+
+                        let imageBase64 = null;
+
+                        if (createCanvas) {
+                            const canvas = createCanvas(Math.floor(viewport.width), Math.floor(viewport.height));
+                            const ctx = canvas.getContext('2d');
+                            await page.render({ canvasContext: ctx, viewport }).promise;
+                            imageBase64 = canvas.toBuffer('image/png').toString('base64');
+                        } else {
+                            // Fallback: render using pdfjs internal annotation canvas
+                            const ops = await page.getOperatorList();
+                            // If no canvas, skip – text will remain empty for this page
+                            console.warn(`[OCR] page ${i}: canvas not available, skipping render`);
+                        }
+
+                        if (!imageBase64) continue;
+
+                        // Call Claude Vision API to extract text from the page
+                        const claudeBody = JSON.stringify({
+                            model: 'claude-opus-4-5',
+                            max_tokens: 4096,
+                            messages: [{
+                                role: 'user',
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: 'This is a bank statement page. Extract ALL the text exactly as it appears, preserving the table structure. Output ONLY the raw text with no explanation. Preserve date formats like DD/MM/YY and number formats like 1,23,456.78.'
+                                    },
+                                    {
+                                        type: 'image',
+                                        source: {
+                                            type: 'base64',
+                                            media_type: 'image/png',
+                                            data: imageBase64
+                                        }
+                                    }
+                                ]
+                            }]
+                        });
+
+                        const ocrText = await new Promise((resolve, reject) => {
+                            const req = https.request({
+                                hostname: 'api.anthropic.com',
+                                path: '/v1/messages',
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'x-api-key': CLAUDE_API_KEY,
+                                    'anthropic-version': '2023-06-01',
+                                    'Content-Length': Buffer.byteLength(claudeBody)
+                                }
+                            }, (res) => {
+                                let data = '';
+                                res.on('data', chunk => data += chunk);
+                                res.on('end', () => {
+                                    try {
+                                        const parsed = JSON.parse(data);
+                                        if (parsed.error) {
+                                            reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
+                                            return;
+                                        }
+                                        const extracted = parsed.content?.[0]?.text || '';
+                                        resolve(extracted);
+                                    } catch (e) {
+                                        reject(e);
+                                    }
+                                });
+                            });
+                            req.on('error', reject);
+                            req.write(claudeBody);
+                            req.end();
+                        });
+
+                        console.log(`[OCR] Page ${i}: extracted ${ocrText.length} chars`);
+                        ocrPages.push(ocrText);
+                    } catch (pageErr) {
+                        console.warn(`[OCR] Page ${i} failed:`, pageErr.message);
+                    }
+                }
+
+                if (ocrPages.length > 0) {
+                    text = ocrPages.join('\n');
+                    rawText = ocrPages.join(' ').replace(/\s+/g, ' ').trim();
+                    console.log(`[parse-bank-statement] OCR complete. Total text length: ${rawText.length}`);
+                } else {
+                    throw new Error('PDF is image-based and OCR extraction also failed. Please upload a text-based PDF or Excel file instead.');
+                }
+            }
+            // ── End OCR fallback ─────────────────────────────────────────────
+
             const lines = text.split('\n');
 
             let bankType = 'generic';
             const upperText = text.toUpperCase();
-            if (upperText.includes('HDFC BANK')) {
+            if (upperText.includes('HDFC BANK') || upperText.includes('HDFC BANK LTD')) {
                 bankType = 'HDFC';
             } else if (upperText.includes('STATE BANK') || upperText.includes('SBI')) {
                 bankType = 'SBI';
@@ -10898,77 +11005,116 @@ ${voucherXml}
             };
 
             if (bankType === 'HDFC') {
-                const matches = [];
-                const rx = /\b(\d{2}\/\d{2}\/\d{2})\s+(\S+)/g;
-                let m;
-                while ((m = rx.exec(rawText)) !== null) {
-                    const dateStr = m[1];
-                    const nextWord = m[2];
-                    const isAmt = /^-?[\d,]+\.\d{2}/.test(nextWord);
-                    if (!isAmt) {
-                        matches.push({
-                            index: m.index,
-                            date: dateStr
+                // Detect if text came from Claude Vision OCR (markdown table format)
+                const isOcrFormat = text.includes('| |') || /\|\s*\d{2}\/\d{2}\/\d{2}\s*\|/.test(text);
+
+                if (isOcrFormat) {
+                    // ── OCR MARKDOWN TABLE PARSER ────────────────────────────
+                    // Transaction rows look like:
+                    //   01/06/26 | narration part 1 | chqRef | 01/06/26 | 200,000.00 | -8,965,678.89
+                    // Continuation rows:
+                    //   | | narration continued | | | | |
+                    const allLines = text.split('\n');
+                    let pendingTx = null;
+
+                    for (const rawLine of allLines) {
+                        const line = rawLine.trim();
+                        if (!line || line === '|---|---|---|---|---|---|') continue;
+
+                        // Detect a transaction row: starts with DD/MM/YY optionally followed by |
+                        const txRowMatch = line.match(/^(\d{2}\/\d{2}\/\d{2})\s*\|?\s*(.*?)\s*\|\s*([A-Za-z0-9]+)\s*\|\s*(\d{2}\/\d{2}\/\d{2})\s*\|\s*([\d,]+\.\d{2})\s*\|\s*(-?[\d,]+\.\d{2})/);
+                        if (txRowMatch) {
+                            if (pendingTx) transactions.push(pendingTx);
+                            const rawDate = txRowMatch[1];
+                            const narrationPart = txRowMatch[2].trim();
+                            const chqRef = txRowMatch[3].trim();
+                            const valDate = txRowMatch[4];
+                            const amtStr = txRowMatch[5];
+                            const balStr = txRowMatch[6];
+                            const amount = parseFloat(amtStr.replace(/,/g, ''));
+                            const closingBalance = parseFloat(balStr.replace(/,/g, ''));
+                            const date = parseDateToDDMMYYYY(rawDate);
+                            const valueDate = parseDateToDDMMYYYY(valDate);
+                            const content = line;
+                            const isDR = /\bDR-|BILLPAY|CHQ DEP|UPI-.*@/.test(content);
+                            const isCR = /\bCR-|CASH DEPOSIT|FT - CR|NEFT CR|RTGS CR|IMPS/.test(content);
+                            const type = (isCR && !isDR) ? 'CR' : 'DR';
+                            pendingTx = {
+                                date, narration: narrationPart, chqRefNo: chqRef, valueDate,
+                                closingBalance, cleanAmts: [amount, closingBalance],
+                                withdrawalAmt: type === 'DR' ? amount : null,
+                                depositAmt: type === 'CR' ? amount : null,
+                                amount, type, _ocrRaw: line
+                            };
+                            continue;
+                        }
+
+                        // Continuation row: | | extra narration text | | | | |
+                        const contMatch = line.match(/^\|\s*\|\s*(.+?)\s*\|/);
+                        if (contMatch && pendingTx) {
+                            const extra = contMatch[1].trim();
+                            if (extra && extra !== '|') {
+                                pendingTx.narration += ' ' + extra;
+                                pendingTx._ocrRaw += ' ' + extra;
+                            }
+                        }
+                    }
+                    if (pendingTx) transactions.push(pendingTx);
+
+                } else {
+                    // ── INDEX-BASED RAW TEXT PARSER (digital/text-based PDFs) ─
+                    const matches = [];
+                    const rx = /\b(\d{2}\/\d{2}\/\d{2})\s+(\S+)/g;
+                    let m;
+                    while ((m = rx.exec(rawText)) !== null) {
+                        const dateStr = m[1];
+                        const nextWord = m[2];
+                        const isAmt = /^-?[\d,]+\.\d{2}/.test(nextWord);
+                        if (!isAmt) {
+                            matches.push({ index: m.index, date: dateStr });
+                        }
+                    }
+
+                    for (let i = 0; i < matches.length; i++) {
+                        const current = matches[i];
+                        const next = matches[i + 1];
+                        const start = current.index;
+                        const end = next ? next.index : rawText.length;
+                        const content = rawText.substring(start, end).trim();
+
+                        if (content.startsWith('Narration') || content.includes('Statement Summary') || content.includes('STATEMENT SUMMARY')) continue;
+
+                        const date = parseDateToDDMMYYYY(current.date);
+                        const valDateMatch = content.substring(current.date.length).match(/\b\d{2}\/\d{2}\/\d{2}\b/);
+                        const valueDate = valDateMatch ? parseDateToDDMMYYYY(valDateMatch[0]) : date;
+                        const nums = content.match(/-?[\d,]+\.\d{2}/g) || [];
+                        const amount = nums.length >= 2 ? parseFloat(nums[nums.length-2].replace(/,/g,'')) : 0;
+                        const closingBal = nums.length >= 1 ? parseFloat(nums[nums.length-1].replace(/,/g,'')) : 0;
+                        const isDR = /\bDR-|BILLPAY|CHQ DEP|UPI-.*@/.test(content);
+                        const isCR = /\bCR-|CASH DEPOSIT/.test(content);
+                        const type = (isCR && !isDR) ? 'CR' : 'DR';
+                        let narration = content.substring(current.date.length).trim();
+                        if (valDateMatch) {
+                            const valDateIdx = content.indexOf(valDateMatch[0], current.date.length);
+                            if (valDateIdx !== -1) narration = content.substring(current.date.length, valDateIdx).trim();
+                        }
+                        let chqRefNo = '';
+                        const infoWords = narration.split(/\s+/);
+                        if (infoWords.length > 1) {
+                            const lastWord = infoWords[infoWords.length - 1];
+                            if (/^[A-Za-z0-9\/-]+$/.test(lastWord) && (lastWord.length >= 4 || /^\d+$/.test(lastWord))) {
+                                chqRefNo = lastWord;
+                                narration = infoWords.slice(0, -1).join(' ');
+                            }
+                        }
+                        transactions.push({
+                            date, narration, chqRefNo, valueDate, closingBalance: closingBal,
+                            cleanAmts: nums.map(x => parseBankAmount(x)),
+                            withdrawalAmt: type === 'DR' ? amount : null,
+                            depositAmt: type === 'CR' ? amount : null,
+                            amount, type
                         });
                     }
-                }
-
-                for (let i = 0; i < matches.length; i++) {
-                    const current = matches[i];
-                    const next = matches[i + 1];
-                    const start = current.index;
-                    const end = next ? next.index : rawText.length;
-                    const content = rawText.substring(start, end).trim();
-
-                    if (content.startsWith('Narration') || content.includes('Statement Summary') || content.includes('STATEMENT SUMMARY')) continue;
-
-                    const date = parseDateToDDMMYYYY(current.date);
-                    
-                    const valDateMatch = content.substring(current.date.length).match(/\b\d{2}\/\d{2}\/\d{2}\b/);
-                    const valueDate = valDateMatch ? parseDateToDDMMYYYY(valDateMatch[0]) : date;
-
-                    const nums = content.match(/-?[\d,]+\.\d{2}/g) || [];
-                    const amount = nums.length >= 2 
-                        ? parseFloat(nums[nums.length-2].replace(/,/g,''))
-                        : 0;
-                    const closingBal = nums.length >= 1
-                        ? parseFloat(nums[nums.length-1].replace(/,/g,''))
-                        : 0;
-
-                    const isDR = /\bDR-|BILLPAY|CHQ DEP|UPI-.*@/.test(content);
-                    const isCR = /\bCR-|CASH DEPOSIT/.test(content);
-                    const type = (isCR && !isDR) ? 'CR' : 'DR';
-
-                    let narration = content.substring(current.date.length).trim();
-                    if (valDateMatch) {
-                        const valDateIdx = content.indexOf(valDateMatch[0], current.date.length);
-                        if (valDateIdx !== -1) {
-                            narration = content.substring(current.date.length, valDateIdx).trim();
-                        }
-                    }
-
-                    let chqRefNo = '';
-                    const infoWords = narration.split(/\s+/);
-                    if (infoWords.length > 1) {
-                        const lastWord = infoWords[infoWords.length - 1];
-                        if (/^[A-Za-z0-9\/-]+$/.test(lastWord) && (lastWord.length >= 4 || /^\d+$/.test(lastWord))) {
-                            chqRefNo = lastWord;
-                            narration = infoWords.slice(0, -1).join(' ');
-                        }
-                    }
-
-                    transactions.push({
-                        date,
-                        narration,
-                        chqRefNo,
-                        valueDate,
-                        closingBalance: closingBal,
-                        cleanAmts: nums.map(x => parseBankAmount(x)),
-                        withdrawalAmt: type === 'DR' ? amount : null,
-                        depositAmt: type === 'CR' ? amount : null,
-                        amount: amount,
-                        type: type
-                    });
                 }
             } else {
                 for (let rawLine of lines) {
