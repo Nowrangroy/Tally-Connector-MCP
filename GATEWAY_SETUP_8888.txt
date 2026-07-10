@@ -1,0 +1,37 @@
+Tally Gateway EXE setup
+======================
+
+1) Copy tally-gateway-8888-x64.exe to the remote Windows server where Tally is running.
+   If the server is 32-bit Windows, use tally-gateway-8888-x86.exe instead.
+
+2) Run the EXE as Administrator.
+   It listens on: 0.0.0.0:8888
+
+3) Open AWS Security Group inbound:
+   TCP 8888
+   Source: your IP only if possible.
+
+4) Open Windows Firewall inbound on the remote server:
+   netsh advfirewall firewall add rule name="Tally Gateway 8888" dir=in action=allow protocol=TCP localport=8888
+
+5) Test from browser/Postman:
+   GET  http://13.202.32.16:8888/health
+   GET  http://13.202.32.16:8888/discover
+   POST http://13.202.32.16:8888/proxy
+
+The MCPB is configured to call:
+   TALLY_HOST=13.202.32.16
+   TALLY_PORT=8888
+   TALLY_GATEWAY_PROXY_PATH=/proxy
+
+How routing works:
+- MCP tools generate normal Tally XML.
+- If targetCompany is provided, the XML includes <SVCURRENTCOMPANY>...</SVCURRENTCOMPANY>.
+- Gateway scans local Tally ports on the remote server, finds company -> port, and forwards XML to the correct Tally instance.
+- Gateway supports multiple companies loaded on the same port because Tally receives SVCURRENTCOMPANY in the XML.
+
+Optional env vars before running EXE:
+   set GATEWAY_PORT=8888
+   set TALLY_GATEWAY_RANGE=9000-11000
+   set TALLY_GATEWAY_PORTS=9044,9094,9900
+   set TALLY_TIMEOUT_MS=2500

@@ -1,0 +1,37 @@
+{
+  "name": "tally-mcp-server",
+  "version": "7.6.9",
+  "description": "Tally Prime MCP Server with reconciliation, GSTR-2B, and Steel & Metals TDS report fixes.",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "scripts": {
+    "start": "node ./dist/index.mjs",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "mailto:tech@upheadstrategy.com"
+  },
+  "author": "Uphead management consultancy services <tech@upheadstrategy.com>",
+  "license": "ISC",
+  "bugs": {
+    "email": "tech@upheadstrategy.com"
+  },
+  "homepage": "mailto:tech@upheadstrategy.com",
+  "dependencies": {
+    "@electric-sql/pglite": "^0.4.5",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "fast-xml-parser": "^5.8.0",
+    "nunjucks": "^3.2.4",
+    "pdf-parse": "^2.4.5"
+  },
+  "devDependencies": {
+    "@types/emscripten": "^1.41.5",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.8.0",
+    "@types/nunjucks": "^3.2.6"
+  }
+}

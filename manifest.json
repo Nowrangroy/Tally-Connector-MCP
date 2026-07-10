@@ -1,0 +1,183 @@
+{
+  "manifest_version": "0.3",
+  "name": "tally-mcp-server",
+  "display_name": "Tally Prime",
+  "version": "7.6.9",
+  "description": "Tally Prime MCP Server with reconciliation, GSTR-2B, and Steel & Metals TDS report fixes.",
+  "author": {
+    "name": "Uphead management consultancy services",
+    "email": "tech@upheadstrategy.com",
+    "url": "mailto:tech@upheadstrategy.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "mailto:tech@upheadstrategy.com"
+  },
+  "homepage": "mailto:tech@upheadstrategy.com",
+  "support": "mailto:tech@upheadstrategy.com",
+  "license": "ISC",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/dist/index.mjs"
+      ],
+      "env": {
+        "TALLY_HOST": "13.202.32.16",
+        "TALLY_PORT": "8888"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "metadata-collection",
+      "description": "returns collections metadata with collection and description"
+    },
+    {
+      "name": "metadata-fields",
+      "description": "returns fields metadata for the selected tally collection containing field name, optional description and data type which can be string, number, date or boolean"
+    },
+    {
+      "name": "query-option-values",
+      "description": "returns predefined option values or drop-down values for the fields required for master and voucher creation, it returns back object array of pre-defined values"
+    },
+    {
+      "name": "query-database",
+      "description": "executes sql query on pglite postgres in-memory database for querying cached Tally Prime report data in table generated as output by other tools (in tableID property from tool output response). These tables are temporary and will be dropped after 15 minutes automatically. Use this tool to run complex analytical queries to aggregate, filter, sort results"
+    },
+    {
+      "name": "discover-companies",
+      "description": "discovers available Tally companies by testing the configured Tally gateway / XML port and returns company names with the port that responded"
+    },
+    {
+      "name": "query-collection",
+      "description": "queries a Tally Prime collection with selected fields and optional context like target company and reporting period. result is cached in pglite postgres in-memory table and returned as tableID. Use query-database tool to run SQL queries against that table for further analysis"
+    },
+    {
+      "name": "list-master",
+      "description": "fetches list of masters from Tally Prime collection e.g. group, ledger, vouchertype, unit, godown, stockgroup, stockitem, costcategory, costcentre, attendancetype, company, currency, gstin, gstclassification returns output in JSON string array in the property list"
+    },
+    {
+      "name": "search-bank-ledgers",
+      "description": "finds possible Tally bank ledgers for a bank keyword such as HDFC/ICICI/SBI/Axis and returns selectable ledger options with ledger name and group only; do not ask the user for closing balance"
+    },
+    {
+      "name": "search-party-ledgers",
+      "description": "finds possible Tally party/customer/supplier ledgers for a party keyword and returns selectable ledger options with ledger name and group only; for uploaded party statements search the statement issuer/header/letterhead party, not your own company name printed as Account Head; do not ask for closing balance"
+    },
+    {
+      "name": "party-ledger-reconciliation",
+      "description": "Fast party ledger reconciliation for Excel/PDF. Supports one or multiple selected Tally ledgers for the same party, marks invoice/reference/date/narration matches with different or minor TDS/discount/round-off amounts as amount_mismatch, and defaults to exceptions-only output to reduce tokens."
+    },
+    {
+      "name": "gstr-2b-reconciliation",
+      "description": "Reconciles official GSTR-2B Excel/JSON with Tally purchase register rows; scans all relevant sheets, hides RCM/zero-tax by default, and flags tax/value/date mismatches with possible reasons."
+    },
+    {
+      "name": "tds-report",
+      "description": "Generates corrected TDS reports including fixed-format section-wise bill-wise rows, broad section detection, PAN/deductee detection, safe amount paid and TDS rate calculation, threshold checking, and advance-payment handling."
+    },
+    {
+      "name": "tds-reconciliation",
+      "description": "Reconciles Tally TDS rows with Form 26AS/TRACES/TDS return/challan rows; flags PAN/section/rate/taxable/TDS/challan mismatches with possible reasons."
+    },
+    {
+      "name": "chart-of-accounts",
+      "description": "fetches chart of accounts or GL hierarchy with fields ledger_name, group_name, primary_group, bs_pl, dr_cr, affects_gross_profit, sort_position. the column bs_pl will have values false = Balance Sheet / true = Profit Loss. Column dr_cr as value true = Debit / false = Credit. primary_group is the primary group of parent or group, under which ledger is nested. The columns group and parent are tree structure represented in flat format. The column affects_gross_profit has values true / false, it is used to determine if ledger under this group will affect gross profit or not. sort_position determines position or placement order with respect to items of same level for display, returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+    },
+    {
+      "name": "trial-balance",
+      "description": "fetches trial balance with fields ledger_name, group_name (blank if Profit & Loss), opening_balance, net_debit, net_credit, closing_balance. opening_balance and closing_balance negative is debit and positive is credit. kindly fetch data from chart-of-accounts tool to pull group hierarchy before calling this tool. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+    },
+    {
+      "name": "profit-loss",
+      "description": "fetches profit and loss statement with fields like ledger_name, group_name, closing_balance. closing_balance negative is debit or expense and positive is credit or income. closing stock to be treated as credit, kindly fetch data from chart-of-accounts tool to pull group hierarchy before calling this tool. for detailed ledger level analysis call trial-balance tool, returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+    },
+    {
+      "name": "balance-sheet",
+      "description": "fetches balance sheet with fields like ledger_name, group_name (blank if Profit & Loss A/c), closing_balance. closing balance negative is debit or asset and positive is credit or liability. kindly fetch data from chart-of-accounts tool to pull group hierarchy before calling this tool. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+    },
+    {
+      "name": "stock-summary",
+      "description": "fetches stock item summary with fields stock_item_name, stock_group_name, opening_quantity, opening_value, inward_quantity, inward_value, outward_quantity, outward_value, closing_quantity, closing_value, returns output cached in pglite postgres in-memory table (specified in tableID property). synonyms (name=stock item / parent=stock group) Use query-database tool to run SQL queries against that table for further analysis"
+    },
+    {
+      "name": "ledger-balance",
+      "description": "fetches ledger closing balance as on date, negative is debit and positive is credit, display Dr for Debit or Cr for Credit after the amount for better readability, instead of negative amount flip Debit or Credit to make it positive"
+    },
+    {
+      "name": "stock-item-balance",
+      "description": "fetches stock item remaining quantity balance as on date, tool returns quantity and unit of measurement"
+    },
+    {
+      "name": "bills-outstanding",
+      "description": "fetches pending overdue outstanding bills receivable or payable as on date with fields bill_date,reference_number,outstanding_amount,party_name,overdue_days. outstanding_amount = Debit is negative and Credit is positive. party_name = ledger_name. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+    },
+    {
+      "name": "group-outstanding",
+      "description": "fetches Sundry Debtors outstanding bills with bill-wise ageing calculated from actual bill date. Calculates aging buckets (< 60 days, 60-90 days, > 90 days) based on actual_days = toDate - bill_date. Groups military sub-groups under 'MILITARY'. Returns output cached in pglite postgres in-memory table."
+    },
+    {
+      "name": "ledger-account",
+      "description": "fetches GL ledger account statement with voucher level details containing fields guid, date, voucher_type, voucher_number, alternate_ledger, party_name, amount, narration . amount = debit is negative and credit is positive. alternate_ledger = if amount is credit then ledger by which it is debited and vice-a-versa (in case of multiple ledgers first one is displayed). returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+    },
+    {
+      "name": "bank-reconciliation",
+      "description": "reconciles selected Tally bank ledger with bank statement rows; supports amount_mismatch for likely TDS/charges/rounding/deductions instead of treating every amount difference as unmatched"
+    },
+    {
+      "name": "stock-item-account",
+      "description": "fetches GL stock item account statement with voucher level details containing fields date, voucher_type, voucher_number, party_name, quantity, amount, narration, tracking_number, voucher_category. party_name = ledger_name. quantity = inward as positive and outward as negative. amount = debit is negative and credit is positive, narration = notes / remarks. for calculating closing balance of quantity, consider rows with tracking_number as empty as it is, but for rows with tracking_number having text value, then duplicate rows need to be removed by preparing intermediate output with aggregation of tracking_number and voucher_category with sum of quantity and then comparing quantity of Receipt Note with Purchase and Delivery Note with Sales to identify and remove the rows with Receipt Note and Delivery Note if they are found to be tracked fully / partially . returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+    },
+    {
+      "name": "ledger-create-update",
+      "description": "create or update ledger master data in Tally Prime, returns success count of created and / or altered records"
+    },
+    {
+      "name": "set-company",
+      "description": "sets the active company context in Tally Prime. This changes the global company context used by Tally for subsequent operations and report queries"
+    },
+    {
+      "name": "set-period",
+      "description": "sets the active reporting period in Tally Prime by specifying a from date and to date. This changes the global period context used by Tally for subsequent report queries"
+    },
+    {
+      "name": "pdf-compare",
+      "description": "Compares two PDF documents and returns a structured diff — lines only in PDF-A, lines only in PDF-B, key-value mismatches (amounts, totals, invoice numbers), numbers present in one but not the other, and a plain-text diff preview. Accepts absolute file paths or base64 PDF content."
+    },
+    {
+      "name": "compare-excel",
+      "description": "Compares two Excel workbooks (.xlsx) and returns a structured diff per sheet: rows only in File-A, rows only in File-B, cell-level value mismatches (same row key + column but different value), sheets present in one workbook but not the other, and summary counts. Row identity is determined by the first column (configurable). Accepts absolute file paths or base64 Excel content."
+    },
+    {
+      "name": "pdf-to-excel",
+      "description": "Extracts text and detected tables from a PDF and writes them to an Excel (.xlsx) file. Each detected table block becomes a separate sheet. Non-table text goes into a Raw Text sheet. Auto-detects tab or multi-space column separators. Numbers are converted to numeric cells with formatting. Output saved to disk (outputPath) or returned as base64. Accepts PDF file path or base64 content."
+    },
+    {
+      "name": "bill-to-tally-excel",
+      "description": "Converts bill/invoice data extracted from an image into a Tally-import-ready Excel (.xlsx) file. Claude analyses the bill image first, then calls this tool with the extracted data. The tool fuzzy-searches Tally for the matching party ledger and each stock item name, then produces a 12-column formatted Excel: Date, Voucher Type, Voucher Number (blank), Party Ledger, Purchase Ledger (blank), Stock Item Name, Quantity, Unit, Rate, Amount, Godown (blank), Narration. Header is bold/blue-filled, data rows in blue font, SUM formula at bottom, and discrepancy flagged if Excel total ≠ bill total."
+    },
+    {
+      "name": "broker-purchase-report",
+      "description": "DEBUG version of broker purchase report — returns raw JSON only. Filters vouchers by broker code in narration."
+    },
+    {
+      "name": "voucher-detail",
+      "description": "Returns all ledger entries on a specific voucher using voucherNumber/voucherTypeName/date or guid."
+    },
+    {
+      "name": "parse-bank-statement",
+      "description": "Parses a bank statement PDF, fuzzy matches transactions to Tally ledgers, performs FIFO bill allocation with TDS/discount support, and exports a styled Format B Excel."
+    }
+  ],
+  "tools_generated": false,
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  }
+}
