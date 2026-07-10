@@ -6,6 +6,22 @@ import { lstCollectionFields, lstPushXml, lstReportConfig, lstReportXml, xmlInvo
 const tally_host = process.env.TALLY_HOST || '13.202.32.16';
 const tally_port = parseInt(process.env.TALLY_PORT || '8888'); // default gateway port
 const lstPullReport = lstReportConfig;
+
+// ── Tally Master Data Cache ───────────────────────────────────────────────────
+// Caches static master collection queries (Ledger, StockItem, etc.) for
+// CACHE_TTL_MS to prevent hammering Tally with repeated identical requests.
+// Date-filtered or active-filter queries are NEVER cached (transactional data).
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const CACHEABLE_COLLECTIONS = new Set(['Ledger', 'StockItem', 'Bill', 'VoucherType', 'Godown', 'Group', 'Company', 'CostCategory', 'CostCentre']);
+const _queryCache = new Map(); // key -> { data, expiry }
+function _cacheKey(collection, fields, filters, company) {
+    return `${collection}|${company || ''}|${fields.join(',')}|${JSON.stringify(Array.from((filters || new Map()).entries()))}`;
+}
+export function clearTallyCache() {
+    _queryCache.clear();
+    console.log('[TallyCache] Cache cleared manually.');
+}
+// ──────────────────────────────────────────────────────────────────────────────
 export const nEnv = new nunjucks.Environment();
 nEnv.addFilter('formatDate', (dt, format) => {
     return utility.Date.format(dt, format);
@@ -93,6 +109,20 @@ export async function fetchReport(targetReport, inputParams) {
 }
 export async function queryCollection(targetCollection, lstFields, lstFilters, targetCompany, fromDate, toDate) {
     let retval = [];
+
+    // ── Cache lookup (master data only, no date or active filter) ────────────
+    const hasActiveFilter = lstFilters && lstFilters.size > 0;
+    const hasDateRange = !!(fromDate || toDate);
+    const isCacheable = CACHEABLE_COLLECTIONS.has(targetCollection) && !hasActiveFilter && !hasDateRange;
+    if (isCacheable) {
+        const ckey = _cacheKey(targetCollection, lstFields, lstFilters, targetCompany);
+        const cached = _queryCache.get(ckey);
+        if (cached && Date.now() < cached.expiry) {
+            return cached.data;
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     try {
         let objTemplateArgs = new Map();
         //assign static variables
@@ -144,6 +174,14 @@ export async function queryCollection(targetCollection, lstFields, lstFilters, t
                 retval.push(o);
             }
         }
+
+        // ── Store in cache if eligible ────────────────────────────────────────
+        if (isCacheable && retval.length > 0) {
+            const ckey = _cacheKey(targetCollection, lstFields, lstFilters, targetCompany);
+            _queryCache.set(ckey, { data: retval, expiry: Date.now() + CACHE_TTL_MS });
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         return retval;
     }
     catch (err) {
@@ -179,6 +217,29 @@ export async function importMasters(targetMaster, objMasterInput) {
         throw err;
     }
 }
+// ── Tally Request Semaphore ────────────────────────────────────────────────────
+// Limits the number of concurrent HTTP requests to Tally to prevent overload.
+// Tally ERP can only process one XML request at a time reliably; serialising
+// them prevents crashes from simultaneous heavy queries.
+const TALLY_MAX_CONCURRENT = 2;
+let _tallyActiveRequests = 0;
+const _tallyQueue = [];
+function _tallyEnqueue(fn) {
+    return new Promise((resolve, reject) => {
+        _tallyQueue.push({ fn, resolve, reject });
+        _tallyDrain();
+    });
+}
+function _tallyDrain() {
+    if (_tallyActiveRequests >= TALLY_MAX_CONCURRENT || _tallyQueue.length === 0) return;
+    const { fn, resolve, reject } = _tallyQueue.shift();
+    _tallyActiveRequests++;
+    fn()
+        .then(result => { _tallyActiveRequests--; _tallyDrain(); resolve(result); })
+        .catch(err  => { _tallyActiveRequests--; _tallyDrain(); reject(err); });
+}
+// ──────────────────────────────────────────────────────────────────────────────
+
 async function sendTallyXml(xml, lstVariables) {
     try {
         // remove targetCompany from lstVariables if found with default value
@@ -191,7 +252,8 @@ async function sendTallyXml(xml, lstVariables) {
             Object.defineProperty(o, k, { enumerable: true, value: v });
         });
         let xmlRequest = nEnv.renderString(xml, o);
-        let xmlResponse = await postTallyXML(xmlRequest);
+        // Queue the actual HTTP request through the semaphore
+        let xmlResponse = await _tallyEnqueue(() => postTallyXML(xmlRequest));
         return xmlResponse;
     }
     catch (err) {
