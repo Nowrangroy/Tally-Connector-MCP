@@ -10898,30 +10898,35 @@ ${voucherXml}
             };
 
             if (bankType === 'HDFC') {
-                const txPattern = /(\d{2}\/\d{2}\/\d{2}) ([A-Za-z0-9][\s\S]+?)(?=\d{2}\/\d{2}\/\d{2}\s+(?:[A-Za-z]|\d{6,})|STATEMENT SUMMARY|\s*Page No|$)/g;
-                let match;
-                while ((match = txPattern.exec(rawText)) !== null) {
-                    const rawDate = match[1];
-                    const content = match[2].trim();
+                const matches = [];
+                const rx = /\b(\d{2}\/\d{2}\/\d{2})\s+(\S+)/g;
+                let m;
+                while ((m = rx.exec(rawText)) !== null) {
+                    const dateStr = m[1];
+                    const nextWord = m[2];
+                    const isAmt = /^-?[\d,]+\.\d{2}/.test(nextWord);
+                    if (!isAmt) {
+                        matches.push({
+                            index: m.index,
+                            date: dateStr
+                        });
+                    }
+                }
+
+                for (let i = 0; i < matches.length; i++) {
+                    const current = matches[i];
+                    const next = matches[i + 1];
+                    const start = current.index;
+                    const end = next ? next.index : rawText.length;
+                    const content = rawText.substring(start, end).trim();
+
                     if (content.startsWith('Narration') || content.includes('Statement Summary') || content.includes('STATEMENT SUMMARY')) continue;
 
-                    const date = parseDateToDDMMYYYY(rawDate);
+                    const date = parseDateToDDMMYYYY(current.date);
                     
-                    // Extract narration part before the value date
-                    const narrationPart = content.split(/\d{2}\/\d{2}\/\d{2}/)[0].trim();
+                    const valDateMatch = content.substring(current.date.length).match(/\b\d{2}\/\d{2}\/\d{2}\b/);
+                    const valueDate = valDateMatch ? parseDateToDDMMYYYY(valDateMatch[0]) : date;
 
-                    let chqRefNo = '';
-                    let narration = narrationPart;
-                    const infoWords = narrationPart.split(/\s+/);
-                    if (infoWords.length > 1) {
-                        const lastWord = infoWords[infoWords.length - 1];
-                        if (/^[A-Za-z0-9\/-]+$/.test(lastWord) && (lastWord.length >= 4 || /^\d+$/.test(lastWord))) {
-                            chqRefNo = lastWord;
-                            narration = infoWords.slice(0, -1).join(' ');
-                        }
-                    }
-
-                    // Get last two numbers — second-to-last is amount, last is closing balance
                     const nums = content.match(/-?[\d,]+\.\d{2}/g) || [];
                     const amount = nums.length >= 2 
                         ? parseFloat(nums[nums.length-2].replace(/,/g,''))
@@ -10930,14 +10935,27 @@ ${voucherXml}
                         ? parseFloat(nums[nums.length-1].replace(/,/g,''))
                         : 0;
 
-                    // DR/CR detection from narration
                     const isDR = /\bDR-|BILLPAY|CHQ DEP|UPI-.*@/.test(content);
                     const isCR = /\bCR-|CASH DEPOSIT/.test(content);
                     const type = (isCR && !isDR) ? 'CR' : 'DR';
 
-                    // Extract value date (first date pattern in the content string)
-                    const valDateMatch = content.match(/\d{2}\/\d{2}\/\d{2}/);
-                    const valueDate = valDateMatch ? parseDateToDDMMYYYY(valDateMatch[0]) : date;
+                    let narration = content.substring(current.date.length).trim();
+                    if (valDateMatch) {
+                        const valDateIdx = content.indexOf(valDateMatch[0], current.date.length);
+                        if (valDateIdx !== -1) {
+                            narration = content.substring(current.date.length, valDateIdx).trim();
+                        }
+                    }
+
+                    let chqRefNo = '';
+                    const infoWords = narration.split(/\s+/);
+                    if (infoWords.length > 1) {
+                        const lastWord = infoWords[infoWords.length - 1];
+                        if (/^[A-Za-z0-9\/-]+$/.test(lastWord) && (lastWord.length >= 4 || /^\d+$/.test(lastWord))) {
+                            chqRefNo = lastWord;
+                            narration = infoWords.slice(0, -1).join(' ');
+                        }
+                    }
 
                     transactions.push({
                         date,
