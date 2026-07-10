@@ -11094,15 +11094,20 @@ ${voucherXml}
             }
 
             // 2. FETCH TALLY MASTERS
-            const [allLedgers, allBills, allStockItems] = await Promise.all([
-                queryCollection('Ledger', ['Name', 'Parent', 'BankAccountNo', 'IFSCCode', 'BankName', '_PrimaryGroup'], new Map(), args.targetCompany),
-                args.billWiseAllocation 
-                    ? queryCollection('Bill', ['BillDate', 'Name', 'ClosingBalance', 'Parent'], new Map(), args.targetCompany)
-                    : Promise.resolve([]),
-                args.billWiseAllocation
-                    ? queryCollection('StockItem', ['Name', 'Unit', 'AlternateUnit', 'Conversion'], new Map(), args.targetCompany)
-                    : Promise.resolve([])
-            ]);
+            let allLedgers = [], allBills = [], allStockItems = [];
+            try {
+                [allLedgers, allBills, allStockItems] = await Promise.all([
+                    queryCollection('Ledger', ['Name', 'Parent', 'BankAccountNo', 'IFSCCode', 'BankName', '_PrimaryGroup'], new Map(), args.targetCompany),
+                    args.billWiseAllocation 
+                        ? queryCollection('Bill', ['BillDate', 'Name', 'ClosingBalance', 'Parent'], new Map(), args.targetCompany)
+                        : Promise.resolve([]),
+                    args.billWiseAllocation
+                        ? queryCollection('StockItem', ['Name', 'Unit', 'AlternateUnit', 'Conversion'], new Map(), args.targetCompany)
+                        : Promise.resolve([])
+                ]);
+            } catch (tallyErr) {
+                console.warn("[parse-bank-statement] Tally is offline or unreachable, continuing with empty masters:", tallyErr.message || tallyErr);
+            }
 
             const stockItemMap = new Map();
             if (Array.isArray(allStockItems)) {
