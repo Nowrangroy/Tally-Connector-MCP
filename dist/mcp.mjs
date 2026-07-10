@@ -10898,7 +10898,7 @@ ${voucherXml}
             };
 
             if (bankType === 'HDFC') {
-                const txPattern = /(\d{2}\/\d{2}\/\d{2}) ((?:RTGS|NEFT|UPI|CASH|CHQ|607)[\s\S]+?)(?=\d{2}\/\d{2}\/\d{2} (?:RTGS|NEFT|UPI|CASH|CHQ|607)|STATEMENT SUMMARY|\s*Page No|$)/g;
+                const txPattern = /(\d{2}\/\d{2}\/\d{2}) ([A-Za-z0-9][\s\S]+?)(?=\d{2}\/\d{2}\/\d{2}\s+(?:[A-Za-z]|\d{6,})|STATEMENT SUMMARY|\s*Page No|$)/g;
                 let match;
                 while ((match = txPattern.exec(rawText)) !== null) {
                     const rawDate = match[1];
